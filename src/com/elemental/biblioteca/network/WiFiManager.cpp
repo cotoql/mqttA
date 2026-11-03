@@ -11,6 +11,15 @@ namespace network
 {
 
 
+namespace
+{
+
+// Cuanto esperar a que el ESP salga de "busy s..." / "busy p...".
+const unsigned int BUSY_BUDGET_MS = 12000;
+
+}
+
+
 WiFiManager::WiFiManager(
         ESPAtDriver& driver
 )
@@ -45,6 +54,12 @@ bool WiFiManager::begin() {
     );
 
 
+    // Sin eco: baja el trafico serie (cada comando ya no vuelve como texto),
+    // evita que el eco se mezcle con respuestas como CLOSED y mantiene la
+    // clave WiFi fuera de cualquier log. Se pierde con AT+RST, por eso va aqui.
+    sendAT("ATE0");
+
+
     sendAT("AT+CWMODE=1");
 
 
@@ -57,13 +72,13 @@ bool WiFiManager::begin() {
     delay(200);
 
 
-   sendAT("AT+CWQAP",3000);
+    sendAT("AT+CWQAP",3000);
 
-delay(1000);
+    delay(1000);
 
-flushESP();
+    flushESP();
 
-return reconnect();
+    return reconnect();
 
 }
 
@@ -107,50 +122,87 @@ bool WiFiManager::reconnect()
 
 
 
-    String resp = sendAT(
+    String resp = sendATWhenIdle(
         cmd,
         20000,
+        BUSY_BUDGET_MS,
         "WIFI CONNECTED"
     );
+
+
+
+    bool joined =
+        resp.indexOf("WIFI CONNECTED") != -1 ||
+        resp.indexOf("ALREADY CONNECTED") != -1;
+
+    if(!joined)
+        return false;
 
 
 
     if(resp.indexOf("WIFI CONNECTED") != -1)
     {
 
+        // Orden normal: WIFI CONNECTED -> WIFI GOT IP -> OK. Si no se
+        // consume el OK final, se le puede colar al siguiente comando.
         waitFor(
             "GOT IP",
-            5000
+            8000
         );
 
-
-        delay(1000);
-
-
-        Serial.println(
-            F("[WiFi] Conectado")
+        waitFor(
+            "OK",
+            2000
         );
-
-
-        Serial.println(
-            getIP()
-        );
-
-
-        return true;
 
     }
 
 
 
-    if(resp.indexOf("ALREADY CONNECTED") != -1)
+    // "WIFI CONNECTED" no garantiza IP: el log mostraba CIPSTART -> "no ip".
+    // Se consulta CIFSR hasta tener una IP valida.
+    String ip;
+
+    unsigned long start = millis();
+
+    do
     {
-        return true;
+
+        ip = getIP();
+
+        if(ip.length() > 0 && ip != "0.0.0.0")
+            break;
+
+        delay(500);
+
+    }
+    while(millis() - start < 10000);
+
+
+
+    if(ip.length() == 0 || ip == "0.0.0.0")
+    {
+
+        Serial.println(
+            F("[WiFi] Sin IP")
+        );
+
+        return false;
+
     }
 
 
 
-    return false;
+    Serial.println(
+        F("[WiFi] Conectado")
+    );
+
+    Serial.println(
+        ip
+    );
+
+
+    return true;
 
 }
 
@@ -159,10 +211,17 @@ bool WiFiManager::reconnect()
 bool WiFiManager::isConnected()
 {
 
-    String resp = sendAT(
+    String resp = sendATWhenIdle(
         "AT+CWJAP?",
-        5000
+        5000,
+        BUSY_BUDGET_MS
     );
+
+
+    // "busy s..." / "busy p..." NO significa WiFi caido: el ESP solo esta
+    // ocupado. Declararlo caido provocaba un CWJAP que derribaba el TCP.
+    if(isBusy(resp))
+        return true;
 
 
     return
@@ -176,17 +235,19 @@ bool WiFiManager::isConnected()
 String WiFiManager::getIP()
 {
 
-    String resp = sendAT(
-        "AT+CIFSR"
+    String resp = sendATWhenIdle(
+        "AT+CIFSR",
+        2000,
+        4000
     );
 
 
     int pos = resp.indexOf("STAIP,\"");
 
-if(pos < 0)
-    return "";
+    if(pos < 0)
+        return "";
 
-pos += strlen("STAIP,\"");
+    pos += strlen("STAIP,\"");
 
 
     int end = resp.indexOf(
@@ -194,11 +255,94 @@ pos += strlen("STAIP,\"");
         pos
     );
 
+    if(end < 0)
+        return "";
+
 
     return resp.substring(
         pos,
         end
     );
+
+}
+
+
+
+bool WiFiManager::isBusy(
+        const String& resp
+)
+{
+
+    return resp.indexOf("busy") != -1;
+
+}
+
+
+
+String WiFiManager::sendATWhenIdle(
+        const String& cmd,
+        unsigned int timeoutMs,
+        unsigned int busyBudgetMs,
+        const String& waitForStr
+)
+{
+
+    unsigned long start = millis();
+
+    String resp;
+
+
+    for(;;)
+    {
+
+        resp = sendAT(
+            cmd,
+            timeoutMs,
+            waitForStr
+        );
+
+
+        if(!isBusy(resp))
+            return resp;
+
+
+        if(millis() - start >= busyBudgetMs)
+            return resp;
+
+
+        delay(300);
+
+    }
+
+}
+
+
+
+bool WiFiManager::resetModule()
+{
+
+    Serial.println(
+        F("[WiFi] Reiniciando modulo (AT+RST)...")
+    );
+
+
+    flushESP();
+
+    _esp.send("AT+RST");
+
+
+    // Tras el reset el ESP escribe basura a 74880 baud y luego "ready".
+    waitFor(
+        "ready",
+        6000
+    );
+
+    delay(1500);
+
+    flushESP();
+
+
+    return begin();
 
 }
 
@@ -271,10 +415,12 @@ String WiFiManager::sendAT(
         )
         {
 
+#if WIFI_DEBUG_RX
             Serial.print("Tipo = ");
             Serial.println((int)command.type());
             Serial.print("Data = ");
             Serial.println(command.data());
+#endif
             response += extractCommand(command);
 
 
@@ -289,6 +435,13 @@ String WiFiManager::sendAT(
 
 
         }
+
+
+
+        // El ESP rechaza el comando con "busy s..." / "busy p..." y NO manda
+        // OK/ERROR despues: no tiene sentido esperar todo el timeout.
+        if(isBusy(response))
+            break;
 
 
 

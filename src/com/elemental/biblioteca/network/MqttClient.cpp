@@ -17,11 +17,20 @@ namespace
 {
 
 const unsigned long PROMPT_TIMEOUT_MS      = 3000;
-const unsigned long SEND_TIMEOUT_MS        = 3000;
+const unsigned long SEND_TIMEOUT_MS        = 5000;
 const unsigned long CONNACK_TIMEOUT_MS     = 5000;
 const unsigned long SUBACK_TIMEOUT_MS      = 5000;
 const unsigned long PING_TIMEOUT_MS        = 10000;
 const unsigned long RECONNECT_INTERVAL_MS  = 5000;
+
+// Cuanto esperar a que el ESP salga de "busy s..." antes de rendirse.
+const unsigned int  BUSY_BUDGET_MS         = 12000;
+
+// Tras N fallos de conexion seguidos se reinicia el modulo (AT+RST).
+const uint8_t       RESET_AFTER_FAILS      = 6;
+
+// Espera entre intentos: 5 s * (1 + fallos), con tope de 5 pasos (30 s).
+const uint8_t       MAX_BACKOFF_STEPS      = 5;
 
 // Escribe un string MQTT (2 bytes de largo + bytes). Devuelve lo escrito.
 size_t putString(uint8_t* dst, const char* s)
@@ -302,17 +311,34 @@ void MqttClient::update()
 
     Serial.println(F("[MQTT] conectando..."));
 
-    if(!connect())
+    if(connect())
     {
-        // Mismo criterio que RestClient: solo se revisa el WiFi si falla el TCP.
+        _failCount = 0;
+    }
+    else
+    {
+        if(_failCount < 255)
+            ++_failCount;
+
+        // Solo se revisa el WiFi si falla el TCP. Si el ESP esta ocupado,
+        // isConnected() ya no lo toma por "WiFi caido".
         if(!_wifi.isConnected())
         {
             Serial.println(F("[MQTT] WiFi caido, reconectando..."));
             _wifi.reconnect();
         }
+
+        if(_failCount >= RESET_AFTER_FAILS)
+        {
+            Serial.println(F("[MQTT] demasiados fallos, reiniciando el ESP"));
+            _wifi.resetModule();
+            _failCount = 0;
+        }
     }
 
-    _nextAttempt = millis() + RECONNECT_INTERVAL_MS;
+    uint8_t steps = (_failCount < MAX_BACKOFF_STEPS) ? _failCount : MAX_BACKOFF_STEPS;
+
+    _nextAttempt = millis() + RECONNECT_INTERVAL_MS * (1UL + steps);
 }
 
 
@@ -327,6 +353,7 @@ void MqttClient::resetStream()
     _sendOk          = false;
     _error           = false;
     _closed          = false;
+    _busy            = false;
     _connAckReceived = false;
     _subAckReceived  = false;
     _connAckCode     = 0xFF;
@@ -349,19 +376,20 @@ void MqttClient::resetStream()
 bool MqttClient::openTcp()
 {
     // Cierra una sesion colgada (si no hay, responde ERROR y no pasa nada).
-    _wifi.sendAT("AT+CIPCLOSE", 1000);
+    // Si el ESP sigue enviando ("busy s...") se espera, no se insiste.
+    _wifi.sendATWhenIdle("AT+CIPCLOSE", 1000, BUSY_BUDGET_MS);
 
     delay(200);
 
     // Conexion unica: el formato de datos entrantes es "+IPD,<len>:".
-    _wifi.sendAT("AT+CIPMUX=0", 1000);
+    _wifi.sendATWhenIdle("AT+CIPMUX=0", 1000, BUSY_BUDGET_MS);
 
     String cmd = "AT+CIPSTART=\"TCP\",\"";
     cmd += _host;
     cmd += "\",";
     cmd += String(_port);
 
-    String resp = _wifi.sendAT(cmd, 8000);
+    String resp = _wifi.sendATWhenIdle(cmd, 8000, BUSY_BUDGET_MS);
 
     // "CONNECT FAIL" contiene "CONNECT": primero se descarta el fallo.
     bool fail = resp.indexOf("FAIL") != -1 || resp.indexOf("ERROR") != -1;
@@ -379,7 +407,9 @@ void MqttClient::closeTcp()
     _connected   = false;
     _pingPending = false;
 
-    _wifi.sendAT("AT+CIPCLOSE", 2000);
+    // Tras un SEND fallido el ESP puede seguir en "busy s..." varios segundos
+    // hasta soltar SEND FAIL/CLOSED: se espera a que quede libre.
+    _wifi.sendATWhenIdle("AT+CIPCLOSE", 2000, BUSY_BUDGET_MS);
     _wifi.flushESP();
 
     resetStream();
@@ -396,12 +426,17 @@ bool MqttClient::sendPacket(const uint8_t* data, size_t length)
     _gotPrompt = false;
     _sendOk    = false;
     _error     = false;
+    _busy      = false;
 
     _esp.send(cmd);
 
     if(!waitFlag(_gotPrompt, PROMPT_TIMEOUT_MS))
     {
-        Serial.println(F("[MQTT] el ESP no dio el prompt '>'"));
+        if(_busy)
+            Serial.println(F("[MQTT] ESP ocupado, no acepto CIPSEND"));
+        else
+            Serial.println(F("[MQTT] el ESP no dio el prompt '>'"));
+
         return false;
     }
 
@@ -431,7 +466,7 @@ bool MqttClient::waitFlag(bool& flag, unsigned long timeoutMs)
         if(flag)
             return true;
 
-        if(_error || _closed)
+        if(_error || _closed || _busy)
             return false;
     }
 
@@ -545,6 +580,13 @@ void MqttClient::processByte(uint8_t b)
     if(endsWith("CLOSED"))
     {
         _closed = true;
+        return;
+    }
+
+    // "busy s..." = sigue enviando, "busy p..." = procesando otro comando.
+    if(endsWith("busy s...") || endsWith("busy p..."))
+    {
+        _busy = true;
         return;
     }
 }

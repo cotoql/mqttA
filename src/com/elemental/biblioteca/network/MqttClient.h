@@ -135,12 +135,14 @@ private:
     unsigned long _pingSentAt  = 0;
     unsigned long _nextAttempt = 0;
     uint16_t      _packetId    = 0;
+    uint8_t       _failCount   = 0;      // intentos de conexion fallidos seguidos
 
     // --- banderas que activa el flujo entrante ---
     bool    _gotPrompt        = false;
     bool    _sendOk           = false;
     bool    _error            = false;
     bool    _closed           = false;
+    bool    _busy             = false;   // el ESP contesto "busy s..." / "busy p..."
     bool    _connAckReceived  = false;
     bool    _subAckReceived   = false;
     uint8_t _connAckCode      = 0xFF;

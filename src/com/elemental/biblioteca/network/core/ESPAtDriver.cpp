@@ -95,7 +95,13 @@ while(_serial.available())
 
 bool ESPAtDriver::send(const char* command) {
     Serial.print(F("[ESP TX] "));
-    Serial.println(command);
+
+    // No volcar SSID/clave al monitor serie.
+    if(strncmp(command, "AT+CWJAP=", 9) == 0)
+        Serial.println(F("AT+CWJAP=\"***\",\"***\""));
+    else
+        Serial.println(command);
+
     _serial.println(command);
     return true;
 }
