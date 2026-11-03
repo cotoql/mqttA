@@ -49,10 +49,10 @@ void setup()
     if(!wifi.begin())
         Serial.println(F("[MAIN] WiFi no conectado, MqttClient reintentara"));
 
-    mqtt.setServer(MQTT_HOST, MQTT_PORT);
+    mqtt.setServer     (MQTT_HOST, MQTT_PORT);
     mqtt.setCredentials(MQTT_USER, MQTT_PASS);
-    mqtt.setClientId(MQTT_CLIENT_ID);
-    mqtt.onMessage(onMqttMessage);
+    mqtt.setClientId   (MQTT_CLIENT_ID);
+    mqtt.onMessage     (onMqttMessage);
 
     // Se registra ahora y se re-suscribe sola en cada reconexion.
     mqtt.subscribe(MQTT_TOPIC);
