@@ -33,6 +33,7 @@ _esp(driver)
 
 bool WiFiManager::begin() {
     //_esp.begin(ESP_SERIAL_BAUD);
+       sendAT("AT+RFPOWER=50");
 
     delay(500);
 
@@ -223,10 +224,12 @@ bool WiFiManager::isConnected()
     if(isBusy(resp))
         return true;
 
+    if(resp.indexOf("+CWJAP:") == -1 || resp.indexOf("No AP") != -1)
+        return false;
 
-    return
-        resp.indexOf("+CWJAP:") != -1 &&
-        resp.indexOf("No AP") == -1;
+    // Asociado al AP no basta: hace falta IP (DHCP).
+    String ip = getIP();
+    return ip.length() > 0 && ip != "0.0.0.0";
 
 }
 
