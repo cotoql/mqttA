@@ -1,0 +1,6 @@
+{
+    "C_Cpp.default.configurationProvider": "platformio.platformio-ide",
+    "clangd.arguments": [
+        "--compile-commands-dir=${workspaceFolder}"
+    ]
+}

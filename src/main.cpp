@@ -13,7 +13,7 @@ using namespace com::elemental::biblioteca::network;
 
 
 // ESP-01 en Serial1 (pines 18/19 del Mega). Ajusta baudios/puerto a tu cableado.
-#define ESP_SERIAL       Serial1
+#define ESP_SERIAL       Serial3
 #define ESP_SERIAL_BAUD  115200
 
 

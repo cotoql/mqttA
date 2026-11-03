@@ -1,0 +1,19 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "PlatformIO: generar base de compilacion para clangd",
+            "type": "shell",
+            "command": "pio",
+            "args": [
+                "run",
+                "--target",
+                "compiledb"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
+        }
+    ]
+}
